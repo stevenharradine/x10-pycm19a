@@ -1,5 +1,9 @@
 === X10 CM19A Python Driver ===
 
+2014-03-30  Michael LeMay
+
+	* pycm19a.py: Duplicated and renamed to pycm19a-pyusb0.py and pycm19a-pyusb1.py, and modified to support pyusb 0.4 and pyusb 1.0.0b1, respectively.
+
 2011-01-04  Scott Cheezem
 
 	* pycm19a.py: Fixed excessive CPU utilization by inserting a sleep in the main loop.

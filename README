@@ -8,11 +8,10 @@ by Michael LeMay
 This driver supports the X10 CM19A USB RF Transceiver.
 To install, simply follow these steps:
 
-1. Uninstall any version of pyusb that may already be installed on your computer.  Currently, Linux distributions often include a version of pyusb that is too old, and it conflicts with the new one.
-2. Install pyusb 1.0 as described on http://pyusb.sf.net.
+2. Install pyusb 0.4 or 1.0.0b1 from http://pyusb.sf.net.
 3. Plugin the X10 CM19A transceiver
 4. Grant access to the appropriate USB device to your preferred user account
-5. As that user, run python pycm19a.py
+5. As that user, run python pycm19a-pyusb0.py or python pycm19a-pyusb1.py depending on whether you have pyusb 0.4 or 1.0 installed.
 
 (click the "X10..." link in the sidebar at http://m.lemays.org for a more detailed tutorial)
 

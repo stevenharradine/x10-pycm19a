@@ -1,4 +1,4 @@
-# /* Copyright (C) 2010 Michael LeMay
+# /* Copyright (C) 2010-2014 Michael LeMay
 #  * 
 #  * This program is free software; you can redistribute it and/or modify
 #  * it under the terms of the GNU General Public License as published by
@@ -17,8 +17,7 @@
 #  * Communications driver for X10 CM19A RF home automation transceiver
 #  */
 
-import usb.core
-import usb.util
+import usb
 import sys
 import threading
 import traceback
@@ -143,7 +142,8 @@ def cmdToChar(cmd):
     raise ValueError('Unrecognized command: ' + str(cmd))
 
 class X10HACommand:
-    def __init__(self, cmd, house, unit):
+    def __init__(self, dev, cmd, house, unit):
+        self.dev = dev
         self.cmd = cmd
         self.house = house.lower()
         self.unit = unit
@@ -154,7 +154,7 @@ class X10HACommand:
         if not ((UNIT_MIN <= unit) and (unit <= UNIT_MAX)):
             raise ValueError('Invalid unit code: ' + self.unit)
 
-    def xmit(self, outEp):
+    def xmit(self, dev, outEp):
         houseCode = HouseCodes[self.house]
         unitCode = UnitCodes[self.unit-1]
         cmdCode = CmdCodes[self.cmd]
@@ -175,7 +175,7 @@ class X10HACommand:
         if DEBUG:
             sys.stderr.write('Sending: ' + str(cmd) + '\n')
 
-        outEp.write(cmd, 10000)
+        dev.interruptWrite(outEp.address, cmd, 10000)
 
     def tostr(self):
         if isCamCode(CmdCodes[self.cmd]):
@@ -183,7 +183,7 @@ class X10HACommand:
         else:
             return cmdToChar(self.cmd) + self.house + str(self.unit)
 
-def X10Send(inp, outEp):
+def X10Send(dev, inp, outEp):
     if DEBUG:
         sys.stderr.write('X10Send called with buffer:' + inp + ' ' + str(len(inp)) + '\n')
 
@@ -239,8 +239,8 @@ def X10Send(inp, outEp):
             raise ValueError('On and off commands require a unit number')
 
 
-    cmd = X10HACommand(cmd, house, unit)
-    cmd.xmit(outEp)
+    cmd = X10HACommand(dev, cmd, house, unit)
+    cmd.xmit(dev, outEp)
 
 # Normal command length
 NORM_CMD_LEN = 5
@@ -260,8 +260,9 @@ ACK = 0x0FF
 Done = False
 
 class ReceiveThread(threading.Thread):
-    def __init__(self, inEp, outEp):
+    def __init__(self, dev, inEp, outEp):
         threading.Thread.__init__(self)
+        self.dev = dev
         self.inEp = inEp
         self.outEp = outEp
         self.lastCmd = ''
@@ -286,7 +287,7 @@ class ReceiveThread(threading.Thread):
         houseCode = (buf[0] & 0x0F0)
         cmdCode = (buf[2] & CmdCodes['CMD_OFF'])
 
-        curCmd = X10HACommand(codeToCmd(cmdCode), houseCodeToChar(houseCode), unitCodeToInt(unitCode)).tostr()
+        curCmd = X10HACommand(self.dev, codeToCmd(cmdCode), houseCodeToChar(houseCode), unitCodeToInt(unitCode)).tostr()
         self.procCmd(curCmd)
 
     def procCamCmd(self, buf):
@@ -294,12 +295,12 @@ class ReceiveThread(threading.Thread):
         houseCode = buf[2]
         unitCode = UnitCodes[0]
         
-        curCmd = X10HACommand(codeToCmd(cmdCode), houseCodeToChar(houseCode), unitCodeToInt(unitCode)).tostr()
+        curCmd = X10HACommand(self.dev, codeToCmd(cmdCode), houseCodeToChar(houseCode), unitCodeToInt(unitCode)).tostr()
         self.procCmd(curCmd)
 
     def listen(self):
         try:
-            dat = self.inEp.read(MAX_CMD_LEN)
+            dat = self.dev.interruptRead(self.inEp.address, MAX_CMD_LEN)
             if dat[0] == NORM_CMD_PFX:
                 self.procNormCmd(dat[1:])
             elif dat[0] == CAM_CMD_PFX:
@@ -310,20 +311,28 @@ class ReceiveThread(threading.Thread):
             traceback.print_exc()
 
 # Initialize CM19A so it recognizes signals from the CR12A or CR14A remote
-def init_remotes(outEp):
+def init_remotes(dev, outEp):
     cr12init1 = [ 0x020, 0x034, 0x0cb, 0x058, 0x0a7 ]
     cr12init2 = [ 0x080, 0x001, 0x000, 0x020, 0x014 ]
     cr12init3 = [ 0x080, 0x001, 0x000, 0x000, 0x014, 0x024, 0x020, 0x020 ]
 
-    writeRes = outEp.write(cr12init1)
-    writeRes = outEp.write(cr12init2)
-    writeRes = outEp.write(cr12init3)
+    writeRes = dev.interruptWrite(outEp.address, cr12init1, 1000)
+    writeRes = dev.interruptWrite(outEp.address, cr12init2, 1000)
+    writeRes = dev.interruptWrite(outEp.address, cr12init3, 1000)
 
 sys.stderr.write('Attempting to remove ati-remote module (if necessary; just ignore any errors it produces)...\n')
 os.system('rmmod ati-remote')
 
+Dev = None
+
 # Locate X10 CM19A:
-Dev = usb.core.find(idVendor=0x0bc7, idProduct=0x0002)
+for bus in usb.busses():
+    devs = bus.devices
+    for dev in devs:
+        if (dev.idVendor == 0x0bc7) and (dev.idProduct == 0x0002):
+            Dev = dev
+            break
+
 # bConfigurationValue = 1
 #   bInterfaceNumber = 0, bAlternateSetting = 0
 #     bEndpointAddress = 129
@@ -332,38 +341,31 @@ Dev = usb.core.find(idVendor=0x0bc7, idProduct=0x0002)
 if Dev is None:
     raise ValueError('Device not found')
 
-sys.stderr.write('Discovered X10 CM19A.  Attempting to set its configuration...\n')
+sys.stderr.write('Discovered X10 CM19A.\n')
 
-# select first configuration:
-try:
-    Dev.set_configuration()
-except:
-    sys.stderr.write('Failed to set configuration.  Are you logged in as root?\n')
-    raise
+Intf = Dev.configurations[0].interfaces[0]
+Alt = Intf[0]
 
-# find output endpoint:
-OutEp = usb.util.find_descriptor(
-        Dev.get_interface_altsetting(),
-        custom_match = \
-            lambda e: \
-                usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT
-    )
+InEp = None
+OutEp = None
 
-sys.stderr.write('Connected to output endpoint: ' + str(OutEp.bEndpointAddress) + '\n')
+for ep in Alt.endpoints:
+    if (ep.address & usb.ENDPOINT_DIR_MASK) == usb.ENDPOINT_IN:
+        sys.stderr.write("Found input endpoint.\n")
+        InEp = ep
+    else:
+        sys.stderr.write("Found output endpoint.\n")
+        OutEp = ep
 
-# find input endpoint:
-InEp = usb.util.find_descriptor(
-        Dev.get_interface_altsetting(),
-        custom_match = \
-            lambda e: \
-                usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN
-    )
+if (InEp is None) or (OutEp is None):
+    raise ValueError('One or both of the endpoints not found.\n')
 
-sys.stderr.write('Connected to input endpoint: ' + str(InEp.bEndpointAddress) + '\n')
+DevHnd = Dev.open()
+DevHnd.claimInterface(Alt.interfaceNumber)
 
-init_remotes(OutEp)
+init_remotes(DevHnd, OutEp)
 
-rcvThr = ReceiveThread(InEp, OutEp)
+rcvThr = ReceiveThread(DevHnd, InEp, OutEp)
 rcvThr.start()
 
 if __name__ == '__main__':
@@ -371,7 +373,7 @@ if __name__ == '__main__':
         while True:
             line = sys.stdin.readline()
             if len(line)>0:
-                X10Send(line[0:len(line)-1], OutEp)
+                X10Send(DevHnd, line[0:len(line)-1], OutEp)
             time.sleep(0.1)
     except:
         traceback.print_exc()
